@@ -1,0 +1,184 @@
+Great—we're aligned now on the key details, and the clarifications resolve the remaining conflicts (e.g., uniform logic across single and multi-file updates: always preserve target header in row 1, clear data rows 2+ with .ClearContents to avoid #REF errors, paste source data from A2+ starting at target A2, append vertically for multi with no blanks). I've assumed the following based on your responses (no wild guesses—let me know if wrong):
+
+- Exact source file names (hardcoded): CAMP_CVM.xlsx, CAMP_SBT.xlsx, ARCHER.xlsx, 16944_APPSEC_CVM.xlsx, 16944_APPSEC_SBT.xlsx, 162000_APPSEC_CVM.xlsx, 162000_APPSEC_SBT.xlsx, 163431_APPSEC_CVM.xlsx. (This matches your "16944,162000,163431" as project IDs, with _APPSEC_CVM/SBT appended; 3 CVM and 2 SBT as per mappings; if wrong, swap in the exact ones.)
+- Order for appends: CVM - 16944 first, then 162000, then 163431; SBT - 16944 first, then 162000.
+- Last row detection: Using column A (assuming it's always populated, as you said "use always populated"—if it's another column, e.g., B, we can change).
+- Last column detection: Based on row 1 (headers).
+- Pasting: As values only (xlPasteValues) to "replace data" safely without bringing source formulas/formats (but we can switch to xlPasteAll if you want formats too post-testing).
+- Column mismatches: Assume they match; code pastes as-is.
+- Backup: Overwrite if same-day file exists; format with dashes (cvm_sbt_31-08-2025.xlsx on today's date).
+- Logging: One row per target per run (5 rows on success); for missing files, one summary row with list of missing. Old/New records: Row counts excluding headers.
+- Button: The main macro is ready; to add the "update sheet" button, run the separate AddButton sub once (it creates/adds to logs sheet and places button there).
+- Other: No deletes, read-only opens, close sources, Excel 365 compatible, no optimizations needed.
+
+If everything looks good, paste this into the VBA editor (Alt+F11 in Excel, insert module), run AddButton once, then test the button. We can iterate if issues (e.g., formulas overwritten—provide details on columns then).
+
+### VBA Code
+
+```vba
+Option Explicit
+
+Sub AddButton()
+    ' Run this once to create the "logs" sheet (if needed) and add the "update sheet" button to it
+    Dim centralWB As Workbook: Set centralWB = ThisWorkbook
+    Dim logWS As Worksheet
+    If Not SheetExists(centralWB, "logs") Then
+        Set logWS = centralWB.Sheets.Add(After:=centralWB.Sheets(centralWB.Sheets.Count))
+        logWS.Name = "logs"
+        With logWS.Range("A1:E1")
+            .Value = Array("Date", "Time", "Target Sheet", "Old Records", "New Records", "Status")
+            .Font.Bold = True
+        End With
+    Else
+        Set logWS = centralWB.Sheets("logs")
+    End If
+    
+    ' Remove existing button if any (to avoid duplicates)
+    Dim shp As Shape
+    For Each shp In logWS.Shapes
+        If shp.Name = "UpdateButton" Then shp.Delete
+    Next shp
+    
+    ' Add button
+    Dim btn As Shape
+    Set btn = logWS.Shapes.AddFormControl(xlButtonControl, Left:=10, Top:=10, Width:=100, Height:=30)
+    btn.Name = "UpdateButton"
+    btn.TextFrame.Characters.Text = "update sheet"
+    btn.OnAction = "UpdateSheets"
+End Sub
+
+Sub UpdateSheets()
+    Dim centralWB As Workbook: Set centralWB = ThisWorkbook
+    Dim folder As String: folder = "C:\CVM_UPDATE\"
+    Dim backupName As String: backupName = "cvm_sbt_" & Format(Date, "dd-mm-yyyy") & ".xlsx"
+    
+    ' Backup (overwrite if exists)
+    Application.DisplayAlerts = False
+    centralWB.SaveCopyAs folder & backupName
+    Application.DisplayAlerts = True
+    
+    ' Get/create logs sheet
+    Dim logWS As Worksheet
+    If Not SheetExists(centralWB, "logs") Then
+        Set logWS = centralWB.Sheets.Add(After:=centralWB.Sheets(centralWB.Sheets.Count))
+        logWS.Name = "logs"
+        With logWS.Range("A1:E1")
+            .Value = Array("Date", "Time", "Target Sheet", "Old Records", "New Records", "Status")
+            .Font.Bold = True
+        End With
+    Else
+        Set logWS = centralWB.Sheets("logs")
+    End If
+    
+    ' Hardcoded all 8 source files
+    Dim allSources() As Variant
+    allSources = Array("CAMP_CVM.xlsx", "CAMP_SBT.xlsx", "ARCHER.xlsx", _
+                       "16944_APPSEC_CVM.xlsx", "162000_APPSEC_CVM.xlsx", "163431_APPSEC_CVM.xlsx", _
+                       "16944_APPSEC_SBT.xlsx", "162000_APPSEC_SBT.xlsx")
+    
+    ' Check if all files exist
+    Dim missing As String, src As Variant
+    For Each src In allSources
+        If Not FileExists(folder & src) Then
+            If missing <> "" Then missing = missing & ", "
+            missing = missing & src
+        End If
+    Next src
+    
+    If missing <> "" Then
+        ' Log failure and exit
+        AppendLog logWS, Format(Date, "dd-mm-yyyy"), Format(Time, "hh:mm:ss"), "All Targets", 0, 0, "Fail - Missing files: " & missing
+        MsgBox "Update failed—check logs for details"
+        Exit Sub
+    End If
+    
+    ' Proceed with updates
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual  ' Speed up, restore at end
+    
+    ' Single mappings
+    UpdateTarget Array("CAMP_CVM.xlsx"), centralWB.Sheets("cvm_camp_rpt"), folder, logWS
+    UpdateTarget Array("CAMP_SBT.xlsx"), centralWB.Sheets("sbt_camp_rpt"), folder, logWS
+    UpdateTarget Array("ARCHER.xlsx"), centralWB.Sheets("archer_status_rpt"), folder, logWS
+    
+    ' Multi CVM
+    UpdateTarget Array("16944_APPSEC_CVM.xlsx", "162000_APPSEC_CVM.xlsx", "163431_APPSEC_CVM.xlsx"), _
+                 centralWB.Sheets("cvm_appsec_rpt"), folder, logWS
+    
+    ' Multi SBT
+    UpdateTarget Array("16944_APPSEC_SBT.xlsx", "162000_APPSEC_SBT.xlsx"), _
+                 centralWB.Sheets("sbt_appsec_rpt"), folder, logWS
+    
+    Application.ScreenUpdating = True
+    Application.Calculation = xlCalculationAutomatic
+    MsgBox "all sheets have been updated successfully"
+End Sub
+
+Private Sub UpdateTarget(sourceFiles() As Variant, targetWS As Worksheet, folder As String, logWS As Worksheet)
+    ' Uniform logic: Clear data rows 2+ (preserve header), paste data from each source A2+ vertically starting at A2, no blanks
+    Dim oldRows As Long
+    oldRows = GetLastRow(targetWS, "A") - 1  ' Exclude header
+    
+    ' Clear data rows (use ClearContents to avoid #REF)
+    If oldRows > 0 Then
+        Dim dataRange As Range
+        Set dataRange = targetWS.Range(targetWS.Cells(2, 1), targetWS.Cells(targetWS.Rows.Count, targetWS.Columns.Count))
+        dataRange.ClearContents
+    End If
+    
+    Dim pasteRow As Long: pasteRow = 2
+    Dim totalNewRows As Long
+    Dim i As Integer
+    For i = LBound(sourceFiles) To UBound(sourceFiles)
+        Dim srcPath As String: srcPath = folder & sourceFiles(i)
+        Dim srcWB As Workbook: Set srcWB = Workbooks.Open(srcPath, ReadOnly:=True)
+        Dim srcWS As Worksheet: Set srcWS = srcWB.Sheets(1)
+        
+        Dim srcLastRow As Long: srcLastRow = GetLastRow(srcWS, "A")
+        If srcLastRow > 1 Then  ' Has data
+            Dim srcLastCol As Long: srcLastCol = GetLastColumn(srcWS)
+            Dim srcDataRng As Range
+            Set srcDataRng = srcWS.Range(srcWS.Cells(2, 1), srcWS.Cells(srcLastRow, srcLastCol))
+            srcDataRng.Copy
+            targetWS.Cells(pasteRow, 1).PasteSpecial Paste:=xlPasteValues
+            totalNewRows = totalNewRows + srcDataRng.Rows.Count
+            pasteRow = pasteRow + srcDataRng.Rows.Count
+        End If
+        
+        srcWB.Close SaveChanges:=False
+    Next i
+    
+    Application.CutCopyMode = False
+    AppendLog logWS, Format(Date, "dd-mm-yyyy"), Format(Time, "hh:mm:ss"), targetWS.Name, oldRows, totalNewRows, "Success"
+End Sub
+
+Private Function GetLastRow(ws As Worksheet, col As String) As Long
+    GetLastRow = ws.Cells(ws.Rows.Count, col).End(xlUp).Row
+End Function
+
+Private Function GetLastColumn(ws As Worksheet) As Long
+    GetLastColumn = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+End Function
+
+Private Sub AppendLog(logWS As Worksheet, logDate As String, logTime As String, target As String, oldRec As Long, newRec As Long, status As String)
+    Dim nextRow As Long: nextRow = GetLastRow(logWS, "A") + 1
+    With logWS
+        .Cells(nextRow, 1).Value = logDate
+        .Cells(nextRow, 2).Value = logTime
+        .Cells(nextRow, 3).Value = target
+        .Cells(nextRow, 4).Value = oldRec
+        .Cells(nextRow, 5).Value = newRec
+        .Cells(nextRow, 6).Value = status
+    End With
+End Sub
+
+Private Function SheetExists(wb As Workbook, sheetName As String) As Boolean
+    On Error Resume Next
+    SheetExists = Not wb.Sheets(sheetName) Is Nothing
+    On Error GoTo 0
+End Function
+
+Private Function FileExists(path As String) As Boolean
+    FileExists = Dir(path) <> ""
+End Function
+```
